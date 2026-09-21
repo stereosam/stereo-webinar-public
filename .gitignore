@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.pyc
+*.mp4
+*.mov
+*.m4a
+*.wav
+*.png
+*.srt
+transcript*.json
+pieces*.json
+lenta*.txt
+drafts/
+sheets/

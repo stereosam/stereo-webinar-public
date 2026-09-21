@@ -1,0 +1,25 @@
+# STEREO Webinar
+
+> An agent skill that turns a long, messy stream or webinar recording into one clean video.
+> It splits the recording into numbered CLEAN and TRASH pieces with boundaries in the pauses
+> between words, lets a human review them by renaming files, shows frames of every clean
+> piece to catch secrets the transcript cannot see, blurs them, and glues the approved pieces
+> from the original at full quality — optionally a few percent faster.
+
+The point of the project: junk in a live recording is recognised by meaning ("I'll be quiet,
+you'll cut this"), not by loudness; and what must be hidden is on the screen, not in the audio.
+
+## Start here
+
+- [SKILL.md](SKILL.md): the sequence an agent follows, and where it must stop and ask.
+- [README.md](README.md): numbers from a real 39-minute stream and why each step works the way it does.
+- [AGENTS.md](AGENTS.md): rules that are not visible from the code.
+
+## Tools
+
+- [tools/transcribe.py](tools/transcribe.py): speech → segments with per-word timings (STEREO Dictator API).
+- [tools/webinar.py](tools/webinar.py): `lenta` (readable timeline), `cut` (drafts named NNN_ЧИСТ/МУСОР), `sheet` (frames of clean pieces), `glue` (from the original, with blur, speed, single-piece preview).
+
+## Optional
+
+- [.env.example](.env.example): the only configuration. Token comes from `/app` in @stereo_dictator_bot.
