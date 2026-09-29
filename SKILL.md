@@ -1,6 +1,6 @@
 ---
 name: webinar
-description: Clean up a long webinar, stream or lesson recording — cut out the waiting, sound checks, technical failures, off-topic chat, long silences and the tail after "goodbye", blur private things on screen (card numbers, chats, mailboxes, IP addresses), optionally speed it up a few percent, and glue the rest into one clean video. Splits the recording into numbered CLEAN / TRASH pieces the human reviews by renaming files, then glues from the original at full quality. Use when asked to clean, trim or remove junk from a webinar, stream, live broadcast or recorded lesson. For short vertical clips use reels; for screen recordings use screencast.
+description: Clean up a long webinar, stream or lesson recording — cut out the waiting, sound checks, technical failures, off-topic chat, long silences and the tail after "goodbye", find and blur private things on screen (card numbers, keys, chats, mailboxes, IP addresses — frame-by-frame OCR on Windows), optionally speed it up a few percent and bleep words, and glue the rest into one clean video. Splits the recording into numbered CLEAN / TRASH pieces the human reviews by renaming files, then glues from the original at full quality. Use when asked to clean, trim or remove junk from a webinar, stream, live broadcast or recorded lesson. For short vertical clips use reels; for screen recordings use screencast.
 ---
 
 # Webinar → one clean video
@@ -88,7 +88,27 @@ number. Read every image. For anything private add a `blur` to that piece in
          [570, 655, 300, 35, 112, 515]]        // only 112–515 s of the source
 ```
 To find coordinates, grab a full-size frame (`ffmpeg -ss T -i stream.mp4 -frames:v 1 f.png`)
-and read positions off it. Check a blur on one piece before gluing everything:
+and read positions off it.
+
+### 4b. Scan the screen frame by frame (Windows)
+
+Three frames per piece miss what is on screen for only a few seconds. On a real stream a
+terminal flashed subscription keys and a server IP for 2–3 seconds at a time, three times;
+`sheet` did not catch it, `scan` did.
+
+```bash
+python $T/webinar.py scan --src stream.mp4 --pieces pieces.json --out scan.json
+```
+One frame per second of every CLEAN piece through the OCR engine built into Windows
+(nothing to install), then patterns: card numbers, card tails and expiry dates, e-mails,
+phone numbers, IP addresses, `vless://`-style links, `password=`/`token=`-style fields,
+API tokens, long random strings. Each finding comes out as a ready `blur` entry — box in
+source pixels, time window in source seconds — with the matched text masked in the middle.
+Findings are candidates: look at the frame, drop false alarms, copy the rest into the
+piece's `"blur"`. ~0.5 s per frame; `--every 2` halves it, `--range 180-260` scans a window.
+Not on Windows: rely on `sheet` and your eyes.
+
+Check a blur on one piece before gluing everything:
 
 ```bash
 python $T/webinar.py glue --src stream.mp4 --pieces pieces.json --drafts drafts \
@@ -105,16 +125,37 @@ python $T/webinar.py glue --src stream.mp4 --pieces pieces.json \
     --drafts drafts --out stream_clean.mp4 [--speed 1.06]
 ```
 Every ЧИСТ piece in number order, re-rendered from the original (libx264 CRF 20, constant
-25 fps — streams are often variable frame rate), blurs applied, a 30 ms audio fade on each
-joint so it does not click, then concatenated without re-encoding. `--speed 1.06` makes it
-6 % faster with the voice pitch unchanged (`atempo`) — viewers do not notice 5–7 %.
+25 fps — streams are often variable frame rate), blurs applied. Sound goes separately:
+each piece as uncompressed PCM with a 30 ms fade at the joints, trimmed to exactly the
+length of its video, then all of it encoded to AAC **once**. Encoding AAC per piece clicks
+at every joint, and a fraction of a frame of audio/video mismatch per piece adds up to a
+second of drift over sixty pieces. `--speed 1.06` makes it 6 % faster with the voice pitch
+unchanged (`atempo`) — viewers do not notice 5–8 %. `--declick` runs `adeclick` over the
+whole track (mouth and microphone clicks; slow).
 
 ### 6. Check
 
 - Length ≈ sum of clean pieces ÷ speed.
 - Frames at the blurred pieces, taken from the RESULT, not the draft.
+- `scan` over the RESULT without `--pieces`: it must find nothing you meant to hide.
 - Transcribe the result and compare with the expected words of the clean pieces: the
   differences should be single words the recogniser heard differently, never a cut-off phrase.
+
+### 7. Bleep words (optional, on the result)
+
+Only if the human names words that must not be heard (swearing, a brand, a name). Transcribe
+the RESULT — after gluing and speed-up the timings differ from the source — then:
+
+```bash
+python $T/transcribe.py --src stream_clean.mp4 --out result.json --words
+python $T/webinar.py beep --src stream_clean.mp4 --transcript result.json \
+    --words "word1,word2" --out stream_final.mp4
+```
+Words are matched by their beginning, case-insensitive. The tone is 1 kHz at 0.035 — clearly
+covers the word without hurting ears (0.2 and 0.07 were rejected as too loud) — from 20 ms
+before the word to its end, at most 0.45 s. Video is copied, only the sound is re-encoded.
+Listen to every listed spot. A bleep hides a word, not the meaning: if what was said must
+not be published, cut the piece instead.
 
 ## What this skill deliberately does not do
 

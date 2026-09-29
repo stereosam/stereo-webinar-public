@@ -18,7 +18,8 @@ you'll cut this"), not by loudness; and what must be hidden is on the screen, no
 ## Tools
 
 - [tools/transcribe.py](tools/transcribe.py): speech → segments with per-word timings (STEREO Dictator API).
-- [tools/webinar.py](tools/webinar.py): `lenta` (readable timeline), `cut` (drafts named NNN_ЧИСТ/МУСОР), `sheet` (frames of clean pieces), `glue` (from the original, with blur, speed, single-piece preview).
+- [tools/webinar.py](tools/webinar.py): `lenta` (readable timeline), `cut` (drafts named NNN_ЧИСТ/МУСОР), `sheet` (frames of clean pieces), `scan` (OCR one frame per second on Windows → ready blur entries for cards, keys, IPs, e-mails), `glue` (from the original, with blur, speed, sound encoded once, single-piece preview), `beep` (bleep named words in the result).
+- [tools/ocr_frames.ps1](tools/ocr_frames.ps1): Windows built-in OCR over a folder of frames, lines with bounding boxes.
 
 ## Optional
 

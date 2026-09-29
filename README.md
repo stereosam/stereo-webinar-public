@@ -35,11 +35,14 @@ cut ───────────► drafts/          001_ЧИСТ_intro_00-
    │                              boundaries snapped into pauses between words
    ▼
 sheet ─────────► sheets/          3 frames of every CLEAN piece → blur what must not show
-   │
+scan ──────────► scan.json        OCR 1 frame/s (Windows): cards, keys, IPs, e-mails →
+   │                              ready blur entries
    │   the HUMAN reviews: trash first, then clean; renames МУСОР ↔ ЧИСТ in Explorer
    ▼
 glue ──────────► clean.mp4        every ЧИСТ, from the ORIGINAL, blurred, faded at joints,
-                                  optionally --speed 1.06
+   │                              sound encoded once; optionally --speed 1.06
+   ▼
+beep ──────────► final.mp4        optional: bleep named words in the result, video copied
 ```
 
 ## Measured
@@ -56,6 +59,8 @@ One real stream: 39 min 27 s, 1920×1080, variable frame rate, mono. Laptop i7-8
 | Secrets found on screen, none in the audio | card number + expiry + CVC, a private chat, the chat list, the author's mailbox and e-mail, his home IP |
 | Glue from the original, 1080p, with blurs | ≈ 5 min |
 | Result at `--speed 1.06` | **20 min 03 s** from 39 min 27 s |
+| `scan` of an 80-second window, 1 frame/s | **22 s**; unblurred version: 4 findings (server IP twice, a subscription key twice), each flashing 2–3 s; published blurred version: 0 |
+| `beep` over an 18-minute result | 16 words, **1.5 min**; 1 kHz band in the window −52 → −32.6 dB |
 | Re-transcription of the result vs expected words | 1716 → 1718 words, 97 % match; every difference a single word heard differently, no phrase cut at a joint |
 
 ## Details worth stealing
@@ -72,6 +77,15 @@ the whole interface.
 **Blur by shrinking.** `boxblur`'s radius is capped by the size of the region, so a narrow
 field of digits stays readable. Scaling the region down 20× and back destroys it at any size.
 Blurs can cover a whole piece or a time window inside it, in source seconds.
+
+**Sound is encoded once.** Every piece's audio is uncompressed and trimmed to exactly the
+length of its video; the whole track goes through AAC in one pass. Per-piece AAC clicked at
+the joints on the first real stream, and small per-piece length differences add up to drift.
+
+**The screen is read, not glanced at.** `sheet` shows three frames per piece — good for
+a chat window that stays open, useless for a terminal that prints a key for two seconds.
+`scan` reads a frame every second with the OCR engine already built into Windows and turns
+each finding into a `blur` entry with coordinates.
 
 **`-t` before `-i`.** With `-t` as an output option, ffmpeg limits the output by the source
 timeline and pads a sped-up piece back to its original length with repeated frames and
@@ -98,6 +112,7 @@ python tools/webinar.py lenta --transcript transcript.json --out lenta.txt
 # read lenta.txt, write pieces.json
 python tools/webinar.py cut   --src stream.mp4 --transcript transcript.json --pieces pieces.json --out drafts
 python tools/webinar.py sheet --src stream.mp4 --pieces pieces.json --out sheets
+python tools/webinar.py scan  --src stream.mp4 --pieces pieces.json --out scan.json   # Windows
 # review drafts, add "blur" to pieces that show secrets
 python tools/webinar.py glue  --src stream.mp4 --pieces pieces.json --drafts drafts --out clean.mp4 --speed 1.06
 ```
@@ -106,6 +121,7 @@ python tools/webinar.py glue  --src stream.mp4 --pieces pieces.json --drafts dra
 
 - **Marking is done by the agent reading the transcript.** There is no automatic junk
   detector, by design: "I'll cut this later" is junk because of what it says.
+- **`scan` needs Windows** (built-in OCR). Elsewhere: `sheet` and your eyes.
 - **Blur regions are rectangles in fixed positions.** If the secret moves (a scrolling page),
   cover the whole area it moves through, or split the piece.
 - **Russian-first.** The recogniser and the file labels are Russian.

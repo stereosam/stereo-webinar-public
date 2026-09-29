@@ -266,6 +266,170 @@ def cmd_sheet(args):
     print(f"кусков {len(pieces)}: смотри каждый кадр — номера карт, пароли, чаты, адреса")
 
 
+# Что считаем секретом на экране. Ловим с запасом: ложное срабатывание человек
+# отметёт за секунду, а пропущенный номер карты в опубликованном ролике не отменить.
+SECRET_RES = [
+    ("карта", re.compile(r"(?<!\d)(?:\d[ -]?){13,19}(?!\d)")),
+    ("хвост карты", re.compile(r"[•*·]{2,}\s?\d{4}")),
+    ("срок карты", re.compile(r"(?<![\d/])(?:0[1-9]|1[0-2])\s?/\s?\d{2}(?![\d/])")),
+    ("почта", re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")),
+    ("IP", re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")),
+    ("телефон", re.compile(r"(?<!\d)(?:\+7|8)[\s(-]*\d{3}[\s)-]*\d{3}[\s-]*\d{2}[\s-]*\d{2}(?!\d)")),
+    ("ссылка-ключ", re.compile(r"(?i)\b(?:vless|vmess|trojan|ss|hysteria2?|tuic)://")),
+    ("параметр ключа", re.compile(r"(?i)\b(?:pbk|sid|uuid|token|api[_-]?key|secret|password|пароль)\s*[=:]")),
+    ("токен", re.compile(r"\b(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|AQVN[A-Za-z0-9_-]{20,}"
+                        r"|\d{8,10}:[A-Za-z0-9_-]{30,})")),
+    ("длинная строка", re.compile(r"[A-Za-z0-9_\-+/=]{32,}")),
+]
+
+
+def luhn_ok(digits):
+    """Контрольная цифра номера карты. Отсекает заглушку «1234 1234 1234 1234» в поле
+    оплаты и склейки дат из списка файлов — на живом эфире это были все ложные «карты»."""
+    if not 13 <= len(digits) <= 19 or len(set(digits)) < 2:
+        return False
+    total = 0
+    for i, ch in enumerate(reversed(digits)):
+        d = int(ch) * (2 if i % 2 else 1)
+        total += d - 9 if d > 9 else d
+    return total % 10 == 0
+
+
+def mask(s):
+    """В отчёт и в консоль секрет целиком не попадает: начало и конец, середина — звёздочки."""
+    s = s.strip()
+    return s if len(s) <= 6 else s[:3] + "*" * min(12, len(s) - 6) + s[-3:]
+
+
+def cmd_scan(args):
+    """
+    OCR экрана кадр в секунду — поиск секретов, которые мелькают на несколько секунд.
+
+    sheet берёт по три кадра на кусок и честно пропускает то, что было на экране
+    полминуты: на эфире 21.09 так проскочили полные ключи подписки в терминале
+    (40 секунд) и хвост карты со сроком в приложении банка. Звук об этом молчал.
+    Распознавание — встроенный в Windows движок (tools/ocr_frames.ps1), ставить
+    ничего не нужно. Результат — заготовки "blur" с координатами и интервалом:
+    перенести в pieces.json, проверить глазами через glue --only.
+    """
+    if os.name != "nt" or not shutil.which("powershell"):
+        die("scan работает на Windows (встроенный OCR). На другой ОС — sheet и глаза")
+    if args.pieces:
+        spans = [(p.get("n", 0), p["start"], p["end"])
+                 for p in load_pieces(args.pieces) if p["kind"] == "clean"]
+    else:
+        dur = float(subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
+             args.src], capture_output=True, text=True, check=True).stdout.strip())
+        spans = [(0, 0.0, dur)]
+    if args.range:
+        a, b = (float(x) for x in args.range.split("-"))
+        spans = [(n, max(s, a), min(e, b)) for n, s, e in spans if e > a and s < b]
+    ps1 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ocr_frames.ps1")
+    tmp = tempfile.mkdtemp(prefix="webinar_scan_")
+    try:
+        frames = {}                    # имя кадра -> (кусок, секунда исходника)
+        k = 0
+        for n, s, e in spans:
+            first = k
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{s:.3f}", "-t", f"{e - s:.3f}",
+                            "-i", args.src, "-vf", f"fps=1/{args.every}", "-start_number",
+                            str(first), os.path.join(tmp, "f%06d.png")], check=True)
+            k = len([x for x in os.listdir(tmp) if x.endswith(".png")])
+            for i in range(first, k):
+                frames[f"f{i:06d}.png"] = (n, s + (i - first) * args.every)
+        print(f"кадров на распознавание: {len(frames)} (~{len(frames) * 0.5 / 60:.0f} мин)")
+        out_json = os.path.join(tmp, "ocr.json")
+        subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1,
+                        "-Dir", tmp, "-Out", out_json, "-Lang", args.lang], check=True,
+                       stdout=subprocess.DEVNULL)
+        ocr = json.load(open(out_json, encoding="utf-8"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # находки -> интервалы: одна и та же находка на соседних кадрах = один интервал
+    hits = {}
+    for item in ocr:
+        n, t = frames.get(item["file"], (0, 0))
+        for ln in item.get("lines") or []:
+            for kind, rx in SECRET_RES:
+                m = rx.search(ln.get("text") or "")
+                if m and kind == "карта" and not luhn_ok(re.sub(r"\D", "", m.group(0))):
+                    continue
+                if m:
+                    hits.setdefault((n, kind), []).append((t, ln["box"], m.group(0)))
+                    break
+    found, pad, gap = [], 12, args.every * 2.5
+    for (n, kind), lst in sorted(hits.items()):
+        lst.sort()
+        group = [lst[0]]
+        for h in lst[1:] + [None]:
+            if h is not None and h[0] - group[-1][0] <= gap:
+                group.append(h)
+                continue
+            xs = [b[0] for _, b, _ in group]; ys = [b[1] for _, b, _ in group]
+            x2 = [b[0] + b[2] for _, b, _ in group]; y2 = [b[1] + b[3] for _, b, _ in group]
+            x, y = max(0, min(xs) - pad), max(0, min(ys) - pad)
+            box = [x, y, max(x2) + pad - x, max(y2) + pad - y,
+                   round(group[0][0] - 0.5, 1), round(group[-1][0] + args.every + 0.5, 1)]
+            found.append({"piece": n, "kind": kind, "blur": box, "sample": mask(group[0][2]),
+                          "frames": len(group)})
+            group = [h] if h else []
+
+    json.dump(found, open(args.out, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    for f in found:
+        b = f["blur"]
+        print(f"  кусок {f['piece']:03d}  {mmss(b[4])}-{mmss(b[5])}  {f['kind']:<15} {f['sample']:<22} "
+              f"blur {b}")
+    print(f"\nнаходок {len(found)} -> {args.out}. Каждую проверить кадром и перенести нужные "
+          f"в \"blur\" куска; координаты — пиксели исходника, время — секунды исходника.")
+
+
+def cmd_beep(args):
+    """
+    Запикать слова в ГОТОВОМ ролике — видео не трогаем, пересобираем только звук.
+
+    Нужна расшифровка готового файла с пословными таймингами (transcribe.py --words
+    по результату, а не по исходнику: после склейки и ускорения время другое).
+    Параметры подобраны на живом эфире: 1 кГц и 0.035 — слышно, что слово закрыто,
+    но не режет уши (0.2 и 0.07 забраковали как громкие); длина писка — само слово,
+    не дольше 0.45 с, чтобы не съедать соседние. Писк — косметика: смысл фразы он
+    не меняет, если сказанное нельзя публиковать — кусок надо вырезать.
+    """
+    words, dur = load_words(args.transcript)
+    stems = [w.strip().lower() for w in args.words.split(",") if w.strip()]
+    wins = []
+    for s, e, text in words:
+        low = re.sub(r"[^\w]", "", text.lower())
+        if any(low.startswith(st) for st in stems):
+            a, b = max(0.0, s - 0.02), min(e, s + args.max_len)
+            wins.append((a, max(b, a + 0.1), text))
+    if not wins:
+        print("совпадений нет — файл не пересобираю")
+        return
+    ch = int(subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels",
+         "-of", "csv=p=0", args.src], capture_output=True, text=True, check=True).stdout.strip() or 2)
+    cond = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b, _ in wins)
+    tone = f"{args.level}*sin(2*PI*{args.freq}*t)*gt({cond},0)"
+    graph = (f"[0:a]volume=0:enable='{cond}'[m];"
+             f"aevalsrc=exprs='{'|'.join([tone] * ch)}':s=48000:d={dur + 1:.3f}[b];"
+             f"[m][b]amix=inputs=2:normalize=0:duration=first[a]")
+    tmp = tempfile.mkdtemp(prefix="webinar_beep_")
+    try:
+        gfile = os.path.join(tmp, "graph.txt")        # сотни окон не лезут в командную строку
+        open(gfile, "w", encoding="utf-8").write(graph)
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", args.src, "-/filter_complex", gfile,
+                        "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                        "-ar", "48000", "-movflags", "+faststart", args.out], check=True)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    for a, b, text in wins:
+        print(f"  {mmss(a)}  {text}")
+    print(f"\nзапикано {len(wins)} -> {args.out}. Послушать каждое место: писк должен закрывать "
+          f"слово целиком и не задевать соседние.")
+
+
 def cmd_glue(args):
     pieces = {p["n"]: p for p in load_pieces(args.pieces) if "n" in p}
     if not pieces:
@@ -288,17 +452,13 @@ def cmd_glue(args):
 
     tmp = tempfile.mkdtemp(prefix="webinar_glue_")
     try:
-        parts = []
+        parts, sounds = [], []
         for i, p in enumerate(keep):
             out = os.path.join(tmp, f"{i:03d}.mp4")
             d = p["end"] - p["start"]
-            # короткий фейд звука на каждом стыке — иначе склейка щёлкает
-            fade = min(0.03, d / 4)
             # Ускорение: atempo меняет темп без сдвига тона (голос не «мультяшный»),
             # видео — setpts. На вебинаре 5-7 % зритель не замечает, а ролик короче.
-            tempo = f",atempo={args.speed}" if args.speed != 1 else ""
-            graph = [f"[0:a]afade=t=in:d={fade:.3f},afade=t=out:st={d - fade:.3f}:d={fade:.3f}"
-                     f"{tempo}[aout]"]
+            graph = []
             # Замазка: "blur": [[x, y, w, h], ...] в пикселях ИСХОДНИКА — на весь кусок,
             # или [x, y, w, h, от, до] — только в этом интервале (секунды исходника).
             # Сжатие в 20 раз и растяжение обратно, а не boxblur: у boxblur радиус
@@ -322,23 +482,58 @@ def cmd_glue(args):
                 graph.append(f"{v}setpts=PTS/{args.speed}[vs]")
                 v, used = "[vs]", used + 1
             vmap = v if used else "0:v:0"
-            subprocess.run(
+            frames = max(1, round(d / args.speed * args.fps))
+            vcmd = [
                 # -t ДО -i: ограничение на вход. После -i ffmpeg режет выход по
                 # времени исходника и молча дотягивает ускоренный кусок до прежней
                 # длины повтором кадров и тишиной — ускорение пропадает.
+                "ffmpeg", "-v", "error", "-y", "-ss", f"{p['start']:.3f}", "-t", f"{d:.3f}",
+                "-i", args.src]
+            if graph:
+                vcmd += ["-filter_complex", ";".join(graph)]
+            vcmd += ["-map", vmap, "-an", "-frames:v", str(frames), "-r", str(args.fps),
+                     "-fps_mode", "cfr", "-c:v", "libx264", "-preset", args.preset,
+                     "-crf", str(args.crf), "-pix_fmt", "yuv420p", out]
+            subprocess.run(vcmd, check=True)
+            # Звук — отдельно, без сжатия, и ровно по длине видео куска. AAC кусками
+            # щёлкает на каждом стыке (у каждого куска свой «разгон» кодера), а разница
+            # длин звука и видео в долю кадра на шестидесяти кусках набегает в секунду
+            # рассинхрона. Поэтому: PCM на кусок, подрезка под число кадров, одна
+            # кодировка в AAC на весь ролик.
+            got = int(subprocess.run(
+                ["ffprobe", "-v", "error", "-count_packets", "-select_streams", "v:0",
+                 "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", out],
+                capture_output=True, text=True, check=True).stdout.strip() or frames)
+            length = got / args.fps
+            fade = min(0.03, d / 4)          # короткий фейд на стыке — без него склейка щёлкает
+            tempo = f",atempo={args.speed}" if args.speed != 1 else ""
+            wav = os.path.join(tmp, f"{i:03d}.wav")
+            subprocess.run(
                 ["ffmpeg", "-v", "error", "-y", "-ss", f"{p['start']:.3f}", "-t", f"{d:.3f}",
-                 "-i", args.src, "-filter_complex", ";".join(graph),
-                 "-map", vmap, "-map", "[aout]", "-r", str(args.fps), "-fps_mode", "cfr",
-                 "-c:v", "libx264", "-preset", args.preset, "-crf", str(args.crf),
-                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-ar", "48000", out],
-                check=True)
+                 "-i", args.src, "-vn", "-af",
+                 f"afade=t=in:d={fade:.3f},afade=t=out:st={d - fade:.3f}:d={fade:.3f}{tempo},"
+                 f"aresample=48000,apad,atrim=end={length:.6f}",
+                 "-ac", "2", "-c:a", "pcm_s16le", wav], check=True)
             parts.append(out)
+            sounds.append(wav)
             print(f"  [{i + 1}/{len(keep)}] {p['file']}")
-        lst = os.path.join(tmp, "list.txt")
-        with open(lst, "w", encoding="utf-8") as f:
-            f.writelines(f"file '{x}'\n" for x in parts)
-        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", lst,
-                        "-c", "copy", "-movflags", "+faststart", args.out], check=True)
+        lists = []
+        for name, files in (("v.txt", parts), ("a.txt", sounds)):
+            lst = os.path.join(tmp, name)
+            with open(lst, "w", encoding="utf-8") as f:
+                f.writelines(f"file '{x}'\n" for x in files)
+            lists.append(lst)
+        video, audio = os.path.join(tmp, "video.mp4"), os.path.join(tmp, "audio.wav")
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", lists[0],
+                        "-c", "copy", video], check=True)
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", lists[1],
+                        "-c", "copy", audio], check=True)
+        # adeclick — по желанию: убирает щелчки во рту и в микрофоне, а не на стыках
+        # (стыки уже чистые); проход медленный, на час записи — несколько минут
+        af = ["-af", "adeclick"] if args.declick else []
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", video, "-i", audio, "-map", "0:v",
+                        "-map", "1:a", "-c:v", "copy", *af, "-c:a", "aac", "-b:a", "160k",
+                        "-ar", "48000", "-movflags", "+faststart", args.out], check=True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -378,11 +573,29 @@ def main():
                    help="ускорить итог, напр. 1.06 = +6 %% (темп голоса сохраняется)")
     g.add_argument("--only", type=int, default=0,
                    help="собрать только кусок N — предпросмотр замазки")
+    g.add_argument("--declick", action="store_true",
+                   help="adeclick по всему звуку: щелчки во рту и микрофона (медленно)")
+    sc = sub.add_parser("scan", help="OCR кадр в секунду: номера карт, ключи, почты на экране")
+    sc.add_argument("--src", required=True)
+    sc.add_argument("--pieces", help="только ЧИСТ-куски манифеста; без него — весь файл")
+    sc.add_argument("--out", required=True, help="json с заготовками blur")
+    sc.add_argument("--every", type=float, default=1.0, help="кадр раз в N секунд")
+    sc.add_argument("--range", help="только отрезок исходника, секунды: 180-260")
+    sc.add_argument("--lang", default="ru", help="язык OCR (ru, en-US)")
+    b = sub.add_parser("beep", help="запикать слова в готовом ролике (видео не трогаем)")
+    b.add_argument("--src", required=True, help="готовый ролик")
+    b.add_argument("--transcript", required=True, help="transcribe.py --words ПО ГОТОВОМУ ролику")
+    b.add_argument("--words", required=True, help="начала слов через запятую, без учёта регистра")
+    b.add_argument("--out", required=True)
+    b.add_argument("--freq", type=float, default=1000.0)
+    b.add_argument("--level", type=float, default=0.035, help="громкость писка, 0..1")
+    b.add_argument("--max-len", type=float, default=0.45, help="писк не длиннее, сек")
     a = p.parse_args()
     for tool in ("ffmpeg", "ffprobe"):
         if not shutil.which(tool):
             die(f"{tool} не найден в PATH")
-    {"lenta": cmd_lenta, "sheet": cmd_sheet, "cut": cmd_cut, "glue": cmd_glue}[a.cmd](a)
+    {"lenta": cmd_lenta, "sheet": cmd_sheet, "cut": cmd_cut, "glue": cmd_glue,
+     "scan": cmd_scan, "beep": cmd_beep}[a.cmd](a)
 
 
 if __name__ == "__main__":
