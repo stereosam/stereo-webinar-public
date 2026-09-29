@@ -104,6 +104,17 @@ cp .env.example .env      # then paste the token into DICTATOR_TOKEN
 Recognition runs in the cloud (GigaAM v3, a Russian speech model, behind the STEREO
 Dictator gateway) — nothing to install, no model to download.
 
+### Install as a skill
+
+| Agent | Where the folder goes | How to call it |
+|---|---|---|
+| Claude Code | `~/.claude/skills/webinar/` (or `<project>/.claude/skills/webinar/`) | ask to clean a stream recording, or `/webinar` |
+| Codex (CLI, IDE, app) | `~/.agents/skills/webinar/` (or `<repo>/.agents/skills/webinar/`) | ask to clean a stream recording, `$webinar`, or pick it in `/skills` |
+
+Both agents read the same `SKILL.md` (`name` + `description` frontmatter); Codex also reads
+`AGENTS.md`. **Copy the folder, do not symlink it** for Codex: symlinked skill folders are not
+always discovered by the CLI. Restart the agent after installing.
+
 ## Quick run
 
 ```bash
