@@ -33,6 +33,19 @@
 "note": "необязательно: почему мусор / что проверить",
 "blur": [[x, y, w, h], [x, y, w, h, от, до]]}, ...] — куски подряд, без дыр.
 Координаты замазки — в пикселях исходника, время — в секундах исходника.
+
+Тематические ролики из длинной записи (один вопрос — один ролик):
+
+  clip  сценарий ролика (куски исходника В НУЖНОМ ПОРЯДКЕ, главы, сноски, заставка) →
+        манифест для glue + план оформления. Длинные паузы внутри кусков ужимаются.
+        Всё в сценарии — во времени ИСХОДНИКА, clip сам переводит во время ролика.
+  dress оформление готового ролика одним проходом: заставка поверх экрана, плашки-главы
+        («о чём сейчас» — держат того, кто перематывает), сноски, замазка.
+  flags речь готового ролика: запрещённое в РФ (VPN, Instagram/Facebook) и мат — с таймкодами.
+
+    python webinar.py clip  --transcript transcript.json --spec c01.json --out c01 --speed 1.15
+    python webinar.py glue  --src эфир.mp4 --pieces c01/pieces.json --out c01/raw.mp4 --speed 1.15
+    python webinar.py dress --src c01/raw.mp4 --plan c01/plan.json --out c01/c01.mp4 ...
 """
 
 import argparse
@@ -282,6 +295,21 @@ SECRET_RES = [
     ("длинная строка", re.compile(r"[A-Za-z0-9_\-+/=]{32,}")),
 ]
 
+# Не секреты, а то, что в РФ нельзя рекламировать или надо сопровождать сноской:
+# средства обхода блокировок (реклама запрещена) и сервисы Meta (организация признана
+# экстремистской). Человек решает сам: замазать, вырезать, поставить сноску. Ловим
+# и на экране (scan), и в речи (flags) — на ролике 04.09 слово «VPN» было только на
+# слайде, а «Instagram» — только голосом.
+RF_RES = [
+    ("РФ: обход блокировок", re.compile(
+        r"(?i)(?<![\w])(?:vpn|впн|v2ray\w*|nekobox|hiddify|happ|karing|outline|wireguard|amnezia\w*"
+        r"|tor\s*browser|прокси|proxy)(?![\w])")),
+    ("РФ: Meta", re.compile(r"(?i)(?<![\w])(?:instagram\w*|инстаграм\w*|инсту|инсте|фейсбук\w*|facebook\w*)"
+                            r"(?![\w])|(?<![\w])Meta(?![\w])")),
+]
+SWEAR_RE = re.compile(r"(?i)(?<![\w])(?:бля\w*|хуй\w*|хуе\w*|хуё\w*|пизд\w*|еба\w*|ёба\w*|ебл\w*|"
+                      r"\w*ебан\w*|сук[аи]\w*|муда\w*|залуп\w*)(?![\w])")
+
 
 def luhn_ok(digits):
     """Контрольная цифра номера карты. Отсекает заглушку «1234 1234 1234 1234» в поле
@@ -352,7 +380,7 @@ def cmd_scan(args):
     for item in ocr:
         n, t = frames.get(item["file"], (0, 0))
         for ln in item.get("lines") or []:
-            for kind, rx in SECRET_RES:
+            for kind, rx in SECRET_RES + RF_RES:
                 m = rx.search(ln.get("text") or "")
                 if m and kind == "карта" and not luhn_ok(re.sub(r"\D", "", m.group(0))):
                     continue
@@ -430,15 +458,259 @@ def cmd_beep(args):
           f"слово целиком и не задевать соседние.")
 
 
+def src_time(v):
+    """'44:04', '1:48:31' или число секунд -> секунды."""
+    if isinstance(v, (int, float)):
+        return float(v)
+    return sum(float(x) * 60 ** i for i, x in enumerate(reversed(str(v).strip().split(":"))))
+
+
+def cmd_clip(args):
+    """
+    Тематический ролик из длинной записи: куски исходника в ЗАДАННОМ порядке.
+
+    Ответ на вопрос в уроке обычно размазан: определение в начале, пример через
+    час, вывод в середине. Сценарий (--spec) перечисляет куски так, как их надо
+    смотреть, а не так, как они шли. Границы подгоняются в паузы между словами,
+    паузы длиннее --gap внутри куска ужимаются до --after + --before.
+
+    --after больше --before не случайно: у GigaAM конец слова — момент, когда
+    модель выдала слово, а не момент, когда звук затих. С запасом 0.2 с после
+    слова на ролике 04.09 срезались хвосты «тебе придётся…» и «…клоду»; 0.4 с — нет.
+
+    Всё в сценарии — во времени исходника. clip переводит главы, сноски и окно
+    заставки во время ролика (с учётом ужатых пауз и --speed) и пишет plan.json
+    для dress. Замазка из сценария уходит в манифест — её делает glue по исходнику.
+    """
+    words, _ = load_words(args.transcript)
+    spec = json.load(open(args.spec, encoding="utf-8"))
+    blur = [[*b[:4], *(src_time(x) for x in b[4:6])] for b in spec.get("blur") or []]
+    pieces = []
+    for k, part in enumerate(spec["parts"], 1):
+        s = round(snap(src_time(part["start"]), "trash", "clean", words), 3)
+        e = round(snap(src_time(part["end"]), "clean", "trash", words), 3)
+        if e <= s:
+            die(f"часть {k}: конец {part['end']} не позже начала {part['start']}")
+        inside = [w for w in words if w[0] >= s - 0.05 and w[1] <= e + 0.05]
+        print(f"{k}. [{stamp(s)}–{stamp(e)}, {e - s:.1f} с] {part.get('title', '')}\n   "
+              + " ".join(w[2] for w in inside) + "\n")
+        cuts = [s]
+        if args.gap > 0:
+            for p, q in zip(inside, inside[1:]):
+                a, b = p[1] + args.after, q[0] - args.before
+                if q[0] - p[1] > args.gap and b > a:
+                    cuts += [a, b]
+        cuts.append(e)
+        for a, b in zip(cuts[::2], cuts[1::2]):
+            n = len(pieces) + 1
+            pieces.append({"n": n, "part": k, "kind": "clean", "title": part.get("title") or f"часть {k}",
+                           "file": f"{n:03d}_{slug(part.get('title') or str(k))}_{stamp(a)}_{stamp(b)}",
+                           "start": round(a, 3), "end": round(b, 3), **({"blur": blur} if blur else {})})
+
+    t = 0.0
+    for p in pieces:
+        p["out"] = round(t, 3)
+        t += (p["end"] - p["start"]) / args.speed
+
+    def to_out(v):
+        x = src_time(v)
+        for p in pieces:
+            if p["start"] - 0.05 <= x <= p["end"] + 0.05:
+                return p["out"] + max(0.0, x - p["start"]) / args.speed
+        # время попало в ужатую паузу — берём ближайший следующий кусок
+        after = [p for p in pieces if 0 <= p["start"] - x <= args.gap * 3]
+        if not after:
+            die(f"время {v} не попадает ни в один кусок сценария")
+        return min(after, key=lambda p: p["start"] - x)["out"]
+
+    plan = {"duration": round(t, 3), "titles": [], "notes": [], "cover": []}
+    for c in spec.get("chapters") or []:
+        # text — на плашку (капс, коротко), desc — в главы описания (обычным регистром)
+        plan["titles"].append({"t": round(to_out(c["at"]), 2), "text": c["text"],
+                               "desc": c.get("desc") or c["text"]})
+    plan["titles"].sort(key=lambda c: c["t"])
+    for nt in spec.get("notes") or []:
+        a = to_out(nt["at"])
+        plan["notes"].append({"from": round(a, 2), "to": round(min(t, a + nt.get("dur", 6)), 2),
+                              "text": nt["text"]})
+    for cv in spec.get("cover") or []:
+        if "parts" in cv:
+            ps = [p for p in pieces if p["part"] in cv["parts"]]
+            a, b = ps[0]["out"], ps[-1]["out"] + (ps[-1]["end"] - ps[-1]["start"]) / args.speed
+        else:
+            a, b = to_out(cv["from"]), to_out(cv["to"])
+        plan["cover"].append({"from": round(a, 2), "to": round(b, 2)})
+
+    os.makedirs(args.out, exist_ok=True)
+    json.dump(pieces, open(os.path.join(args.out, "pieces.json"), "w", encoding="utf-8"),
+              ensure_ascii=False, indent=1)
+    json.dump(plan, open(os.path.join(args.out, "plan.json"), "w", encoding="utf-8"),
+              ensure_ascii=False, indent=1)
+    src_len = sum(src_time(x["end"]) - src_time(x["start"]) for x in spec["parts"])
+    print(f"частей {len(spec['parts'])}, кусков {len(pieces)}; исходник {src_len:.0f} с -> "
+          f"после пауз {sum(p['end'] - p['start'] for p in pieces):.0f} с -> при {args.speed} — "
+          f"{t:.0f} с ({mmss(t)})")
+    if plan["titles"]:
+        print("\nглавы для описания YouTube:")
+        for c in plan["titles"]:
+            print(f"  {mmss(c['t'])} {c['desc']}")
+    for c in plan["cover"]:
+        print(f"заставка: {c['from']:.2f}–{c['to']:.2f} с")
+    for nt in plan["notes"]:
+        print(f"сноска: {nt['from']:.2f}–{nt['to']:.2f} с — {nt['text']}")
+    print(f"\n-> {args.out}/pieces.json (для glue без --drafts), {args.out}/plan.json (для dress)")
+
+
+def box_arg(s, n=4):
+    v = [float(x) for x in s.split(",")]
+    if len(v) != n:
+        die(f"ожидалось {n} чисел через запятую: {s}")
+    return v
+
+
+def ff_path(p):
+    """Путь для параметра фильтра ffmpeg: прямые слэши, двоеточие экранировано."""
+    return os.path.abspath(p).replace("\\", "/").replace(":", "\\:")
+
+
+def cmd_dress(args):
+    """
+    Оформление готового ролика одним проходом кодера.
+
+    Заставка (--cover) — картинка в области экрана на время, когда на экране
+    ничего полезного (на ролике 04.09 — погода в ChatGPT, пока шла речь про
+    агентов). Вписывается в область демонстрации, панель задач и камеры остаются —
+    выглядит так, будто она открыта у автора на экране.
+
+    Плашки-главы (titles из plan.json) — крупный заголовок «о чём сейчас» в пустой
+    полосе кадра. Тот, кто перематывает, видит тему и не уходит; формулировки те же,
+    что в главах описания. Текст идёт через textfile — двоеточия, кавычки и запятые
+    в заголовке не ломают фильтр.
+
+    Сноски (notes) — мелкая плашка внизу: «*Instagram принадлежит Meta…».
+    Замазка (--blur x,y,w,h,от,до) — в пикселях и секундах ГОТОВОГО ролика.
+    """
+    plan = json.load(open(args.plan, encoding="utf-8")) if args.plan else {}
+    w, h, dur = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=width,height:format=duration", "-of", "default=nw=1:nk=1", args.src],
+        capture_output=True, text=True, check=True).stdout.split()[:3]
+    W, H, dur = int(w), int(h), float(dur)
+    font = ff_path(args.font) if args.font else font_file()
+    if not font:
+        die("нет шрифта — укажи --font")
+    tmp = tempfile.mkdtemp(prefix="webinar_dress_")
+    try:
+        g, v, k, inputs = [], "[0:v]", 0, ["-i", args.src]
+
+        def step(expr):
+            nonlocal v, k
+            g.append(f"{v}{expr}[d{k}]")
+            v, k = f"[d{k}]", k + 1
+
+        def win(a, b):
+            return f"between(t,{a:.3f},{b:.3f})"
+
+        covers = plan.get("cover") or []
+        if args.cover_time:
+            covers = [dict(zip(("from", "to"), box_arg(x, 2))) for x in args.cover_time]
+        if args.cover and covers:
+            if not args.cover_box:
+                die("для заставки нужна --cover-box x,y,w,h — область экрана в кадре")
+            x, y, cw, ch = (int(q) for q in box_arg(args.cover_box))
+            inputs += ["-loop", "1", "-i", args.cover]
+            g.append(f"[1:v]scale={cw}:{ch}:force_original_aspect_ratio=increase,crop={cw}:{ch}[cov]")
+            g.append(f"{v}[cov]overlay={x}:{y}:shortest=1:enable='"
+                     + "+".join(win(c["from"], c["to"]) for c in covers) + f"'[d{k}]")
+            v, k = f"[d{k}]", k + 1
+
+        for j, s in enumerate(args.blur or []):
+            x, y, bw, bh, a, b = box_arg(s, 6)
+            x, y, bw, bh = int(x), int(y), int(bw), int(bh)
+            sw, sh = max(2, bw // 20 // 2 * 2), max(2, bh // 20 // 2 * 2)
+            g.append(f"{v}split[bm{j}][bc{j}]")
+            g.append(f"[bc{j}]crop={bw}:{bh}:{x}:{y},scale={sw}:{sh}:flags=area,"
+                     f"scale={bw}:{bh}:flags=bicubic[bz{j}]")
+            g.append(f"[bm{j}][bz{j}]overlay={x}:{y}:enable='{win(a, b)}'[d{k}]")
+            v, k = f"[d{k}]", k + 1
+
+        titles = plan.get("titles") or []
+        if titles:
+            if not args.title_box:
+                die("для плашек-глав нужна --title-box x,y,w,h — пустая полоса кадра")
+            x, y, tw, th = (int(q) for q in box_arg(args.title_box))
+            step(f"drawbox=x={x}:y={y}:w={tw}:h={th}:color=0x{args.plate}@1:t=fill:"
+                 f"enable='gte(t,{titles[0]['t']:.3f})'")
+            for i, c in enumerate(titles):
+                a = c["t"]
+                b = titles[i + 1]["t"] if i + 1 < len(titles) else dur + 1
+                tf = os.path.join(tmp, f"title_{i:02d}.txt")
+                open(tf, "w", encoding="utf-8").write(c["text"])
+                # кегль под ширину: капс жирного гротеска ~0.74 em на знак
+                fs = int(min(th * 0.56, tw * 0.9 / (max(1, len(c["text"])) * 0.74)))
+                base = (f"drawtext=fontfile='{font}':textfile='{ff_path(tf)}':fontsize={fs}:"
+                        f"enable='{win(a, b)}':")
+                cx, cy = f"{x}+({tw}-text_w)/2", f"{y}+({th}-text_h)/2"
+                if args.glitch:          # фирменная обводка: красный и голубой сдвиг
+                    step(base + f"fontcolor=0xE63B2E:x={cx}-3:y={cy}-3")
+                    step(base + f"fontcolor=0x2EC4F0:x={cx}+3:y={cy}+3")
+                step(base + f"fontcolor=0x{args.ink}:x={cx}:y={cy}")
+
+        nx, ny = (int(q) for q in box_arg(args.note_pos, 2)) if args.note_pos else (40, H - 50)
+        for i, nt in enumerate(plan.get("notes") or []):
+            tf = os.path.join(tmp, f"note_{i:02d}.txt")
+            open(tf, "w", encoding="utf-8").write(nt["text"])
+            step(f"drawtext=fontfile='{font}':textfile='{ff_path(tf)}':fontsize={args.note_size}:"
+                 f"fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=10:x={nx}:y={ny}:"
+                 f"enable='{win(nt['from'], nt['to'])}'")
+
+        if not g:
+            die("нечего делать: нет ни заставки, ни замазки, ни глав, ни сносок")
+        gfile = os.path.join(tmp, "graph.txt")
+        open(gfile, "w", encoding="utf-8").write(";".join(g))
+        subprocess.run(["ffmpeg", "-v", "error", "-y", *inputs, "-/filter_complex", gfile,
+                        "-map", v, "-map", "0:a?", "-c:v", "libx264", "-crf", str(args.crf),
+                        "-preset", args.preset, "-pix_fmt", "yuv420p", "-c:a", "copy",
+                        "-movflags", "+faststart", args.out], check=True)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if not os.path.isfile(args.out) or os.path.getsize(args.out) == 0:
+        die("оформление не записало файл")
+    print(f"готово: {args.out} — заставка {len(covers) if args.cover else 0}, замазок "
+          f"{len(args.blur or [])}, глав {len(titles)}, сносок {len(plan.get('notes') or [])}. "
+          f"Проверить кадрами на каждой смене главы.")
+
+
+def cmd_flags(args):
+    """
+    Речь готового ролика: что в РФ требует решения (VPN, Instagram/Facebook) и мат.
+    Экран проверяет scan — те же слова он ловит в OCR. Решение за человеком:
+    сноска (dress), писк (beep), вырезать.
+    """
+    words, _ = load_words(args.transcript)
+    hits = 0
+    for s, e, text in words:
+        for kind, rx in RF_RES + [("мат", SWEAR_RE)]:
+            if rx.search(text):
+                print(f"  {mmss(s)}  {kind:<22} {text}")
+                hits += 1
+                break
+    print(f"\nнаходок {hits}" + (" — каждое место решить: сноска, писк или вырезать" if hits else ""))
+
+
 def cmd_glue(args):
     pieces = {p["n"]: p for p in load_pieces(args.pieces) if "n" in p}
     if not pieces:
         die("в манифесте нет номеров — сначала cut")
     status = {}
-    for name in os.listdir(args.drafts):
-        m = NAME_RE.match(name)
-        if m and name.endswith(".mp4"):
-            status[int(m.group(1))] = KIND_OF[m.group(2)]
+    if args.drafts:
+        for name in os.listdir(args.drafts):
+            m = NAME_RE.match(name)
+            if m and name.endswith(".mp4"):
+                status[int(m.group(1))] = KIND_OF[m.group(2)]
+    else:
+        # манифест от clip: черновиков нет, человек утверждает сам ролик целиком
+        status = {n: p["kind"] for n, p in pieces.items()}
     keep = [pieces[n] for n in sorted(status) if status[n] == "clean" and n in pieces]
     if args.only:
         # предпросмотр одного куска в полном качестве — проверить замазку
@@ -516,7 +788,7 @@ def cmd_glue(args):
                  "-ac", "2", "-c:a", "pcm_s16le", wav], check=True)
             parts.append(out)
             sounds.append(wav)
-            print(f"  [{i + 1}/{len(keep)}] {p['file']}")
+            print(f"  [{i + 1}/{len(keep)}] {p.get('file') or p['title']}")
         lists = []
         for name, files in (("v.txt", parts), ("a.txt", sounds)):
             lst = os.path.join(tmp, name)
@@ -564,7 +836,8 @@ def main():
     g = sub.add_parser("glue")
     g.add_argument("--src", required=True)
     g.add_argument("--pieces", required=True)
-    g.add_argument("--drafts", required=True)
+    g.add_argument("--drafts", help="папка черновиков (статус из имён); без неё — все clean "
+                                    "из манифеста по номерам, как пишет clip")
     g.add_argument("--out", required=True)
     g.add_argument("--fps", type=int, default=25)
     g.add_argument("--crf", type=int, default=20)
@@ -590,12 +863,40 @@ def main():
     b.add_argument("--freq", type=float, default=1000.0)
     b.add_argument("--level", type=float, default=0.035, help="громкость писка, 0..1")
     b.add_argument("--max-len", type=float, default=0.45, help="писк не длиннее, сек")
+    cl = sub.add_parser("clip", help="тематический ролик: куски исходника в заданном порядке")
+    cl.add_argument("--transcript", required=True, help="расшифровка ИСХОДНИКА с --words")
+    cl.add_argument("--spec", required=True, help="сценарий: parts, chapters, notes, cover, blur")
+    cl.add_argument("--out", required=True, help="папка ролика: pieces.json + plan.json")
+    cl.add_argument("--speed", type=float, default=1.0, help="то же, что будет у glue")
+    cl.add_argument("--gap", type=float, default=1.2, help="ужимать паузы длиннее, сек (0 — нет)")
+    cl.add_argument("--after", type=float, default=0.4, help="оставить после слова, сек")
+    cl.add_argument("--before", type=float, default=0.2, help="оставить перед словом, сек")
+    dr = sub.add_parser("dress", help="оформление готового ролика: заставка, главы, сноски, замазка")
+    dr.add_argument("--src", required=True, help="готовый ролик (glue)")
+    dr.add_argument("--plan", help="plan.json от clip: titles, notes, cover")
+    dr.add_argument("--out", required=True)
+    dr.add_argument("--cover", help="картинка-заставка поверх области экрана")
+    dr.add_argument("--cover-box", help="x,y,w,h области экрана в кадре")
+    dr.add_argument("--cover-time", action="append", help="от,до (сек ролика), вместо cover из плана")
+    dr.add_argument("--title-box", help="x,y,w,h полосы под плашки-главы")
+    dr.add_argument("--font", help="шрифт плашек и сносок (жирный гротеск с кириллицей)")
+    dr.add_argument("--plate", default="FFC400", help="цвет плашки, hex")
+    dr.add_argument("--ink", default="151515", help="цвет текста плашки, hex")
+    dr.add_argument("--glitch", action="store_true", help="красно-голубой сдвиг под текстом")
+    dr.add_argument("--note-pos", help="x,y сноски (по умолчанию слева внизу)")
+    dr.add_argument("--note-size", type=int, default=22)
+    dr.add_argument("--blur", action="append", help="x,y,w,h,от,до — пиксели и секунды РОЛИКА")
+    dr.add_argument("--crf", type=int, default=20)
+    dr.add_argument("--preset", default="veryfast")
+    fl = sub.add_parser("flags", help="речь ролика: VPN, Instagram/Facebook, мат — с таймкодами")
+    fl.add_argument("--transcript", required=True, help="transcribe.py --words ПО ГОТОВОМУ ролику")
     a = p.parse_args()
     for tool in ("ffmpeg", "ffprobe"):
         if not shutil.which(tool):
             die(f"{tool} не найден в PATH")
     {"lenta": cmd_lenta, "sheet": cmd_sheet, "cut": cmd_cut, "glue": cmd_glue,
-     "scan": cmd_scan, "beep": cmd_beep}[a.cmd](a)
+     "scan": cmd_scan, "beep": cmd_beep, "clip": cmd_clip, "dress": cmd_dress,
+     "flags": cmd_flags}[a.cmd](a)
 
 
 if __name__ == "__main__":

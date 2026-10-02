@@ -157,6 +157,45 @@ before the word to its end, at most 0.45 s. Video is copied, only the sound is r
 Listen to every listed spot. A bleep hides a word, not the meaning: if what was said must
 not be published, cut the piece instead.
 
+## Topic clips from a long recording (one question — one video)
+
+A lesson answers a question in scattered places: the definition at minute 26, the example an
+hour later, the conclusion at minute 32. Pick the keyword first (the `keywords` skill), then
+write a spec in SOURCE time — the parts in the order they should be watched:
+
+```json
+{"parts":    [{"start": "26:38", "end": 1626.3, "title": "what an agent in a chat can do"},
+              {"start": "1:48:31", "end": 6557.6, "title": "the chat builds, Codex deploys"}],
+ "chapters": [{"at": "26:38", "text": "ЧТО УМЕЕТ ИИ-АГЕНТ", "desc": "Что умеет ИИ-агент"}],
+ "notes":    [{"at": 1940.5, "dur": 7, "text": "*Instagram принадлежит компании Meta…"}],
+ "cover":    [{"parts": [1]}],
+ "blur":     [[485, 575, 32, 18, 1948.5, 2000]]}
+```
+
+```bash
+python $T/webinar.py clip  --transcript transcript.json --spec c01.json --out c01 --speed 1.15
+python $T/webinar.py glue  --src stream.mp4 --pieces c01/pieces.json --out c01/raw.mp4 --speed 1.15
+python $T/webinar.py dress --src c01/raw.mp4 --plan c01/plan.json --out c01/c01.mp4 \
+    --cover banner.png --cover-box 18,249,1125,604 --title-box 18,112,1125,112 \
+    --font Montserrat-Black.ttf --glitch
+python $T/transcribe.py --src c01/c01.mp4 --out c01/result.json --words
+python $T/webinar.py flags --transcript c01/result.json      # VPN, Instagram, swearing in speech
+python $T/webinar.py scan  --src c01/c01.mp4 --out c01/scan.json   # same words + secrets on screen
+```
+
+- `clip` snaps every boundary into a word gap and squeezes pauses longer than 1.2 s inside a
+  part down to 0.4 s after the word + 0.2 s before the next. Keep `--after` larger: GigaAM
+  word ends are emission moments, the sound goes on — at 0.2 s word tails were cut.
+  It prints the YouTube chapter lines (`desc`) already shifted to clip time.
+- `dress`: a cover image over the screen area while the screen shows nothing useful (the
+  taskbar and cameras stay — it looks like it is open on the author's screen); chapter
+  plates in an empty band of the frame — "what is this about now" for viewers who scrub,
+  same wording as the description chapters; footnotes; blur in RESULT pixels/seconds.
+- Russia: advertising ways around blocking (VPN) is banned, Meta is designated extremist.
+  `scan` and `flags` report both. The human decides: footnote, blur, bleep or cut —
+  never carry over a decision made for another video.
+- Collect the human's edits for a clip into one list and render once; every render costs minutes.
+
 ## What this skill deliberately does not do
 
 Decide on its own what is junk, publish, or trust the transcript to reveal what is on screen.
