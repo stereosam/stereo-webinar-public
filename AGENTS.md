@@ -34,4 +34,11 @@ Things that are not visible from the code.
 - **`-/filter_complex file`**, not `-filter_complex_script` (removed in ffmpeg 7+): a bleep
   expression with hundreds of windows does not fit on a Windows command line.
 - **`--diarize` drops word timings** on the recognition server. Transcribe without it.
+- **The server's clock runs short on long files.** A 8479.00 s file came back as 8478.25 s
+  with every timestamp compressed by the same ratio — words 0.07 s early at minute 13 and
+  0.76 s early at minute 138 (checked against excerpts transcribed on their own). Clips cut
+  late in a stream then lose word endings and pick up the tail of the previous phrase.
+  `transcribe.py` now rescales all times by real / reported duration (`time_scale` in JSON).
+- **`clip` part `"exact": true`** skips snapping when the gap between phrases is shorter
+  than the tail of the previous word.
 - Dependencies: Python 3.9+, `ffmpeg`/`ffprobe` in PATH. Standard library only.

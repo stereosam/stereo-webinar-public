@@ -98,7 +98,42 @@ def transcribe(src: Path, token: str, api: str = DEFAULT_API,
     audio = src if src.suffix.lower() in AUDIO_EXT else extract_audio(src)
     data = post_file(api, token, audio, diarize, max_speakers, timeout, words)
     data["source"] = str(src)
+    fix_time_scale(data, audio)
     return data
+
+
+def media_duration(path: Path) -> float:
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                          "-of", "csv=p=0", str(path)], capture_output=True, text=True).stdout
+    try:
+        return float(out.strip())
+    except ValueError:
+        return 0.0
+
+
+def fix_time_scale(data: dict, audio: Path) -> None:
+    """Stretch the server's timeline back to the real one.
+
+    The server returned 8478.25 s for a file that is 8479.00 s long, and every
+    timestamp was compressed by the same ratio: words came 0.07 s early at minute
+    13 and 0.76 s early at minute 138 (measured against short excerpts transcribed
+    on their own). Over a long stream that is enough to cut the end of a word off
+    and drag the tail of the previous phrase into a clip. Fixed by scaling all
+    times by real_duration / reported_duration.
+    """
+    real, reported = media_duration(audio), float(data.get("duration") or 0)
+    if real <= 0 or reported <= 0 or abs(real - reported) / real < 2e-5:
+        return
+    k = real / reported
+    for seg in data.get("segments", []):
+        for key in ("start", "end"):
+            if key in seg:
+                seg[key] = round(seg[key] * k, 3)
+        for w in seg.get("words") or []:
+            for key in ("start", "end"):
+                if key in w:
+                    w[key] = round(w[key] * k, 3)
+    data["duration"], data["time_scale"] = round(real, 3), round(k, 7)
 
 
 def main() -> None:

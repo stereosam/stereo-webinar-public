@@ -487,8 +487,14 @@ def cmd_clip(args):
     blur = [[*b[:4], *(src_time(x) for x in b[4:6])] for b in spec.get("blur") or []]
     pieces = []
     for k, part in enumerate(spec["parts"], 1):
-        s = round(snap(src_time(part["start"]), "trash", "clean", words), 3)
-        e = round(snap(src_time(part["end"]), "clean", "trash", words), 3)
+        # "exact": true — границы как есть, без подгонки в паузу: когда пауза короче
+        # хвоста чужого слова (конец слова у GigaAM раньше, чем затих звук), подгонка
+        # оставляет в начале куска обрывок предыдущей реплики
+        if part.get("exact"):
+            s, e = src_time(part["start"]), src_time(part["end"])
+        else:
+            s = round(snap(src_time(part["start"]), "trash", "clean", words), 3)
+            e = round(snap(src_time(part["end"]), "clean", "trash", words), 3)
         if e <= s:
             die(f"часть {k}: конец {part['end']} не позже начала {part['start']}")
         inside = [w for w in words if w[0] >= s - 0.05 and w[1] <= e + 0.05]
